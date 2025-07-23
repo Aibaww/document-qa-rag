@@ -1,14 +1,25 @@
 import pdfplumber
 import tiktoken
-import os
 import openai
+import faiss
+import csv
+import numpy as np
+import os
+from dotenv import load_dotenv
 
+#
+# SETUP
+#
 # Load OpenAI API key
+load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
 # Load the tokenizer
 tokenizer = tiktoken.get_encoding("cl100k_base")
 
+#
+# FUNCTIONS
+#
 # Extract text from PDF
 def extract_text_from_pdf(pdf_path):
     all_text = ""
@@ -48,25 +59,68 @@ def get_embedding(text_chunk, model="text-embedding-3-small"):
     )
     return response.data[0].embedding
 
-# Read pdf
+# Save to CSV
+def save_to_csv(chunks, embeddings, file_path="pdf_chunks.csv"):
+    with open(file_path, mode="w", newline='', encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["text", "embedding", "n_tokens"])
+        for chunk, embedding in zip(chunks, embeddings):
+            n_tokens = len(tokenizer.encode(chunk))
+            writer.writerow([chunk, str(embedding), n_tokens])
+
+# Build cosine FAISS index
+def build_faiss_cosine_index(embeddings):
+    # Normalize for cosine similarity
+    vectors = np.array(embeddings).astype("float32")
+    faiss.normalize_L2(vectors)
+    index = faiss.IndexFlatIP(vectors.shape[1])  # IP = inner product = cosine if normalized
+    index.add(vectors)
+    return index
+
+# Search FAISS with similarity filtering
+def search_similar_paragraphs(index, query, chunks, threshold=0.7, top_k=5):
+    query_embedding = get_embedding(query)
+    query_vector = np.array([query_embedding]).astype("float32")
+    faiss.normalize_L2(query_vector)
+
+    D, I = index.search(query_vector, top_k)
+    
+    results = []
+    for i, sim in zip(I[0], D[0]):
+        if sim >= threshold:
+            results.append({
+                "text": chunks[i],
+                "similarity": float(sim),
+                "tokens": len(tokenizer.encode(chunks[i]))
+            })
+    return results
+
+
+#
+# PIPELINE
+#
 pdf_path = "test.pdf"
+
+print("Extracting text...")
 text = extract_text_from_pdf(pdf_path)
+
+print("Chunking...")
 chunks = chunk_text_by_tokens(text, max_tokens=300)
 
-# # Print result
-# for i, chunk in enumerate(chunks):
-#     print(f"--- Chunk {i + 1} ({len(tokenizer.encode(chunk))} tokens) ---")
-#     print(chunk)
-#     print()
+print("Embedding...")
+embeddings = [get_embedding(chunk) for chunk in chunks]
 
-# Get embeddings
-embeddings = []
-for i, chunk in enumerate(chunks):
-    embedding = get_embedding(chunk)
-    embeddings.append({
-        "chunk_index": i,
-        "token_count": len(tokenizer.encode(chunk)),
-        "text": chunk,
-        "embedding": embedding
-    })
-    print(f"Chunk {i + 1} embedded.")
+print("Saving to CSV...")
+save_to_csv(chunks, embeddings)
+
+print("Building index...")
+index = build_faiss_cosine_index(embeddings)
+
+# Example query
+query = "What are the main findings of the document?"
+results = search_similar_paragraphs(index, query, chunks, threshold=0.7, top_k=5)
+
+print("\nTop similar paragraphs:")
+for r in results:
+    print(f"\n(Similarity: {r['similarity']:.2f}) [{r['tokens']} tokens]")
+    print(r['text'])
