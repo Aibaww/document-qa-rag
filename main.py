@@ -1,8 +1,9 @@
-import pdfplumber
+import fitz
 import tiktoken
 import openai
 import faiss
 import csv
+import json
 import numpy as np
 import os
 from dotenv import load_dotenv
@@ -17,18 +18,32 @@ openai.api_key = os.getenv("OPENAI_API_KEY")
 # Load the tokenizer
 tokenizer = tiktoken.get_encoding("cl100k_base")
 
+# Constant file paths
+PROCESSED_DB = "processed_files.json"
+CSV_DIR = "csv_outputs"
+os.makedirs(CSV_DIR, exist_ok=True)
+
 #
 # FUNCTIONS
 #
+# Load or create processed file database
+def load_processed_db():
+    if os.path.exists(PROCESSED_DB):
+        with open(PROCESSED_DB, "r") as f:
+            return json.load(f)
+    return {}
+
+def save_processed_db(db):
+    with open(PROCESSED_DB, "w") as f:
+        json.dump(db, f)
+
 # Extract text from PDF
 def extract_text_from_pdf(pdf_path):
-    all_text = ""
-    with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
-            text = page.extract_text()
-            if text:
-                all_text += text + "\n"
-    return all_text.strip()
+    text = ""
+    with fitz.open(pdf_path) as doc:
+        for page in doc:
+            text += page.get_text() + "\n"
+    return text.strip()
 
 # Split text into chunks of max_token tokens
 def chunk_text_by_tokens(text, max_tokens=300):
@@ -78,7 +93,7 @@ def build_faiss_cosine_index(embeddings):
     return index
 
 # Search FAISS with similarity filtering
-def search_similar_paragraphs(index, query, chunks, threshold=0.7, top_k=5):
+def search_similar_paragraphs(index, query, chunks, threshold=0.5, top_k=5):
     query_embedding = get_embedding(query)
     query_vector = np.array([query_embedding]).astype("float32")
     faiss.normalize_L2(query_vector)
@@ -99,28 +114,86 @@ def search_similar_paragraphs(index, query, chunks, threshold=0.7, top_k=5):
 #
 # PIPELINE
 #
-pdf_path = "test.pdf"
+# --- Main pipeline ---
+def process_pdf(pdf_path):
+    print("Checking if already processed...")
+    processed_db = load_processed_db()
+    abs_path = os.path.abspath(pdf_path)
 
-print("Extracting text...")
-text = extract_text_from_pdf(pdf_path)
+    if abs_path in processed_db:
+        print("Already processed. Skipping embedding pipeline.")
+        return processed_db[abs_path]
 
-print("Chunking...")
-chunks = chunk_text_by_tokens(text, max_tokens=300)
+    print("Extracting text...")
+    text = extract_text_from_pdf(pdf_path)
+    print("Chunking...")
+    chunks = chunk_text_by_tokens(text)
+    print(f"Total chunks: {len(chunks)}")
 
-print("Embedding...")
-embeddings = [get_embedding(chunk) for chunk in chunks]
+    print("Generating embeddings...")
+    embeddings = [get_embedding(chunk) for chunk in chunks]
 
-print("Saving to CSV...")
-save_to_csv(chunks, embeddings)
+    print("Saving to CSV...")
+    file_id = os.path.splitext(os.path.basename(pdf_path))[0]
+    csv_path = os.path.join(CSV_DIR, f"{file_id}_chunks.csv")
+    save_to_csv(chunks, embeddings, csv_path)
 
-print("Building index...")
-index = build_faiss_cosine_index(embeddings)
+    # Save FAISS index to memory (could persist later)
+    print("Building FAISS index...")
+    index = build_faiss_cosine_index(embeddings)
 
-# Example query
-query = "What are the main findings of the document?"
-results = search_similar_paragraphs(index, query, chunks, threshold=0.7, top_k=5)
+    # Save processed state
+    processed_db[abs_path] = {
+        "chunks": chunks,
+        "csv_path": csv_path
+    }
+    save_processed_db(processed_db)
 
-print("\nTop similar paragraphs:")
-for r in results:
-    print(f"\n(Similarity: {r['similarity']:.2f}) [{r['tokens']} tokens]")
-    print(r['text'])
+    return {"chunks": chunks, "csv_path": csv_path, "index": index, "embeddings": embeddings}
+
+# --- CLI ---
+def run_cli():
+    print("PDF Semantic Search CLI")
+    pdf_path = input("Enter path to a PDF file: ").strip()
+
+    if not os.path.isfile(pdf_path) or not pdf_path.lower().endswith(".pdf"):
+        print("Invalid PDF path.")
+        return
+
+    result = process_pdf(pdf_path)
+    chunks = result["chunks"]
+
+    # If index not already present, rebuild from CSV
+    if "index" in result:
+        index = result["index"]
+    else:
+        # Rebuild index from CSV
+        print("Rebuilding index from CSV...")
+        with open(result["csv_path"], "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            chunks = []
+            embeddings = []
+            for row in reader:
+                chunks.append(row["text"])
+                embedding = json.loads(row["embedding"].replace("'", '"'))  # ensure proper format
+                embeddings.append(embedding)
+        index = build_faiss_cosine_index(embeddings)
+
+    print("\nType a question to search. Type 'quit' or 'end' to exit.")
+
+    while True:
+        query = input("\nYour query: ").strip()
+        if query.lower() in {"quit", "end"}:
+            print("Exiting. Goodbye!")
+            break
+
+        results = search_similar_paragraphs(index, query, chunks, threshold=0.5, top_k=5)
+        if not results:
+            print("No relevant paragraphs found above similarity threshold.")
+        else:
+            for i, r in enumerate(results):
+                print(f"\nResult {i+1} (Similarity: {r['similarity']:.2f}) [{r['tokens']} tokens]:\n{r['text']}")
+
+
+if __name__ == "__main__":
+    run_cli()

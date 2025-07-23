@@ -1,0 +1,5 @@
+openai
+PyMuPDF
+tiktoken
+faiss-cpu
+python-dotenv

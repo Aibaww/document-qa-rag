@@ -2,4 +2,5 @@
 env/
 *.pdf
 *.csv
+/csv_outputs
 *.json
