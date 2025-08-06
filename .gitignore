@@ -4,3 +4,4 @@ env/
 *.csv
 /csv_outputs
 *.json
+__pycache__/
