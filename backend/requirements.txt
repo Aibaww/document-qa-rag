@@ -6,3 +6,6 @@ sqlalchemy
 pgvector
 psycopg2
 tqdm
+fastapi
+uvicorn
+python-multipart
