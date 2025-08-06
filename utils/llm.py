@@ -15,7 +15,7 @@ def render_rag_prompt(company, user_request, context_entries):
     # Format context into readable, cited markdown blocks
     if context_entries:
         formatted_context = "\n\n".join(
-            f"**[Page {entry['page_number']}, {entry['document']}]**\n{entry['text']}"
+            f"**[Page {entry.page_number}, {entry.document_name}]**\n{entry.chunk}"
             for entry in context_entries
         )
     else:

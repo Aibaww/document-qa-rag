@@ -1,5 +1,8 @@
 openai
 PyMuPDF
 tiktoken
-faiss-cpu
 python-dotenv
+sqlalchemy
+pgvector
+psycopg2
+tqdm
